@@ -248,7 +248,8 @@ void dhcpv6_ia_enum_addrs(struct interface *iface, struct dhcp_assignment *c,
 			if (!ADDR_ENTRY_VALID_IA_ADDR(iface, i, m, addrs))
 				continue;
 
-			addr.s6_addr32[3] = htonl(c->assigned);
+			addr.s6_addr32[2] = htonl(c->assigned >> 32);
+			addr.s6_addr32[3] = htonl(c->assigned & UINT32_MAX);
 		} else {
 			if (!valid_prefix_length(c, addrs[i].prefix))
 				continue;
@@ -363,7 +364,7 @@ void dhcpv6_ia_write_statefile(void)
 					odhcpd_hexlify(duidbuf, ctxt.c->clid_data, ctxt.c->clid_len);
 
 					/* iface DUID iaid hostname lifetime assigned length [addrs...] */
-					ctxt.buf_idx = snprintf(ctxt.buf, ctxt.buf_len, "# %s %s %x %s%s %"PRId64" %x %u ",
+					ctxt.buf_idx = snprintf(ctxt.buf, ctxt.buf_len, "# %s %s %x %s%s %"PRId64" %zx %u ",
 								ctxt.iface->ifname, duidbuf, ntohl(ctxt.c->iaid),
 								(ctxt.c->flags & OAF_BROKEN_HOSTNAME) ? "broken\\x20" : "",
 								(ctxt.c->hostname ? ctxt.c->hostname : "-"),
@@ -688,12 +689,32 @@ static bool assign_na(struct interface *iface, struct dhcp_assignment *a)
 	/* Seed RNG with checksum of DUID */
 	for (size_t i = 0; i < a->clid_len; ++i)
 		seed += a->clid_data[i];
-	srand(seed);
+	srandom(seed);
 
 	/* Try to assign up to 100x */
 	for (size_t i = 0; i < 100; ++i) {
-		uint32_t try;
-		do try = ((uint32_t)rand()) % 0x0fff; while (try < 0x100);
+		uint64_t try;
+
+		if (iface->dhcpv6_hostid_len > 32) {
+			uint32_t mask_high;
+
+			if (iface->dhcpv6_hostid_len >= 64)
+				mask_high = UINT32_MAX;
+			else
+				mask_high = (1 << (iface->dhcpv6_hostid_len - 32)) - 1;
+			do {
+				try = (uint32_t)random();
+				try |= (uint64_t)((uint32_t)random() & mask_high) << 32;
+			} while (try < 0x100);
+		} else {
+			uint32_t mask_low;
+
+			if (iface->dhcpv6_hostid_len == 32)
+				mask_low = UINT32_MAX;
+			else
+				mask_low = (1 << iface->dhcpv6_hostid_len) - 1;
+			do try = ((uint32_t)random()) & mask_low; while (try < 0x100);
+		}
 
 		if (config_find_lease_by_hostid(try))
 			continue;
@@ -928,7 +949,8 @@ static size_t build_ia(uint8_t *buf, size_t buflen, uint16_t status,
 					.valid = htonl(prefix_valid)
 				};
 
-				o_ia_a.addr.s6_addr32[3] = htonl(a->assigned);
+				o_ia_a.addr.s6_addr32[2] = htonl(a->assigned >> 32);
+				o_ia_a.addr.s6_addr32[3] = htonl(a->assigned & UINT32_MAX);
 
 				if (!ADDR_ENTRY_VALID_IA_ADDR(iface, i, m, addrs))
 					continue;
@@ -1006,7 +1028,8 @@ static size_t build_ia(uint8_t *buf, size_t buflen, uint16_t status,
 								ia_p->prefix == ((a->managed) ? addrs[i].prefix : a->length))
 							found = true;
 					} else {
-						addr.s6_addr32[3] = htonl(a->assigned);
+						addr.s6_addr32[2] = htonl(a->assigned >> 32);
+						addr.s6_addr32[3] = htonl(a->assigned & UINT32_MAX);
 
 						if (!memcmp(&ia_a->addr, &addr, sizeof(addr)))
 							found = true;
